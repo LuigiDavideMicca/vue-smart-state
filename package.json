@@ -1,0 +1,41 @@
+{
+  "name": "vue-smart-state",
+  "version": "0.0.2",
+  "description": "A type-safe, reactive, persistent and cross-tab Vue 3+ useState composable",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "vue",
+    "vue3",
+    "state",
+    "useState",
+    "composable",
+    "persistent",
+    "localStorage",
+    "vue-plugin"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "peerDependencies": {
+    "vue": ">=3.0.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "@vue/runtime-core": "^3.5.13",
+    "typescript": "^5.8.3"
+  }
+}
