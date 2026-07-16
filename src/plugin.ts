@@ -1,5 +1,5 @@
-import { App } from 'vue'
-import { useState, UseStateOptions } from './useState'
+import type { App } from 'vue'
+import { useState } from './useState'
 
 export const SmartStatePlugin = {
   install(app: App) {
@@ -7,7 +7,7 @@ export const SmartStatePlugin = {
   }
 }
 
-declare module '@vue/runtime-core' {
+declare module 'vue' {
   interface ComponentCustomProperties {
     $useSmartState: typeof useState
   }
