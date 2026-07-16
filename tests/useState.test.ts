@@ -118,6 +118,33 @@ describe('ttl', () => {
   })
 })
 
+describe('writeDebounce', () => {
+  it('delays the write and coalesces rapid changes', async () => {
+    vi.useFakeTimers()
+    const [, set] = useState('a', { persist: true, storageKey: KEY, writeDebounce: 200 })
+    set('b')
+    await nextTick()
+    set('c')
+    await nextTick()
+    expect(localStorage.getItem(KEY)).toBeNull()
+    vi.advanceTimersByTime(200)
+    expect(localStorage.getItem(KEY)).toBe('"c"')
+  })
+
+  it('flushes a pending write when the scope is disposed', async () => {
+    vi.useFakeTimers()
+    const scope = effectScope()
+    await scope.run(async () => {
+      const [, set] = useState('a', { persist: true, storageKey: KEY, writeDebounce: 200 })
+      set('pending')
+      await nextTick()
+    })
+    expect(localStorage.getItem(KEY)).toBeNull()
+    scope.stop()
+    expect(localStorage.getItem(KEY)).toBe('"pending"')
+  })
+})
+
 describe('custom serializer', () => {
   it('round-trips through the provided serializer', async () => {
     const serializer = {

@@ -30,6 +30,8 @@ export interface UseStateOptions<T> {
   syncTabs?: boolean
   /** Milliseconds a persisted value stays fresh; expired values fall back to the initial value. */
   ttl?: number
+  /** Debounce persisted writes by this many ms (great for text inputs). Sync stays instant. */
+  writeDebounce?: number
   /** Custom (de)serialization; defaults to JSON. */
   serializer?: Serializer<T>
   /** Called instead of `console.warn` when reading, writing or syncing fails. */
@@ -70,6 +72,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     deepWatch = false,
     syncTabs = false,
     ttl,
+    writeDebounce,
     serializer = defaultSerializer<T>(),
     onError = (error, context) =>
       console.warn(`[vue-smart-state] ${context} failed for key "${storageKey}"`, error)
@@ -138,8 +141,39 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     }
   }
 
+  let writeTimer: ReturnType<typeof setTimeout> | undefined
+  const cancelPendingWrite = () => {
+    if (writeTimer !== undefined) {
+      clearTimeout(writeTimer)
+      writeTimer = undefined
+    }
+  }
+
   if (storage) {
-    watch(state, write, { deep: deepWatch })
+    watch(
+      state,
+      (val) => {
+        if (writeDebounce === undefined) {
+          write(val)
+          return
+        }
+        cancelPendingWrite()
+        writeTimer = setTimeout(() => {
+          writeTimer = undefined
+          write(state.value)
+        }, writeDebounce)
+      },
+      { deep: deepWatch }
+    )
+    if (writeDebounce !== undefined && getCurrentScope()) {
+      // flush a pending debounced write instead of losing it with the component
+      onScopeDispose(() => {
+        if (writeTimer !== undefined) {
+          cancelPendingWrite()
+          write(state.value)
+        }
+      })
+    }
   }
 
   if (storage && syncTabs) {
@@ -174,10 +208,12 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
 
   const controls: UseStateControls = {
     reset: () => {
+      cancelPendingWrite()
       state.value = initialValue as UnwrapRef<T>
       write(initialValue)
     },
     clear: () => {
+      cancelPendingWrite()
       try {
         storage?.removeItem(storageKey)
       } catch (error) {
