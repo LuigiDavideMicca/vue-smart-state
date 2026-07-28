@@ -16,6 +16,21 @@ export interface Serializer<T> {
   write: (value: T) => string
 }
 
+/** Minimal vendored Standard Schema v1 interface (https://standardschema.dev) — no dependency. */
+export interface StandardSchemaV1<Input = unknown, Output = Input> {
+  readonly '~standard': {
+    readonly version: 1
+    readonly vendor: string
+    readonly validate: (
+      value: unknown
+    ) => StandardSchemaResult<Output> | Promise<StandardSchemaResult<Output>>
+  }
+}
+
+export type StandardSchemaResult<Output> =
+  | { readonly value: Output; readonly issues?: undefined }
+  | { readonly issues: ReadonlyArray<{ readonly message: string }> }
+
 export interface UseStateOptions<T> {
   /** Use a shallowRef instead of a deep ref. */
   shallow?: boolean
@@ -36,6 +51,8 @@ export interface UseStateOptions<T> {
   serializer?: Serializer<T>
   /** Validate untrusted data from storage or other tabs: return the value or throw. */
   parse?: (value: unknown) => T
+  /** Standard Schema (Zod 4, Valibot, ArkType…) validating hydrated data. Wins over `parse`. */
+  schema?: StandardSchemaV1<unknown, T>
   /** Schema version of the persisted value. Bump it when the shape changes. */
   version?: number
   /** Upgrade values persisted with an older version; return undefined to discard them. */
@@ -88,6 +105,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     writeDebounce,
     serializer = defaultSerializer<T>(),
     parse,
+    schema,
     version,
     migrate,
     onError = (error, context) =>
@@ -125,6 +143,17 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
       if (!migrate) return undefined
       value = migrate(value, fromVersion)
       if (value === undefined) return undefined
+    }
+    if (schema) {
+      const result = schema['~standard'].validate(value)
+      if (result instanceof Promise) {
+        console.error(
+          `[vue-smart-state] async schema validation is not supported for key "${storageKey}" — keeping the initial value`
+        )
+        return undefined
+      }
+      if (result.issues) return undefined
+      return result.value
     }
     return parse ? parse(value) : (value as T)
   }

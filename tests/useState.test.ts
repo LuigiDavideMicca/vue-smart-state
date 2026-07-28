@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, isRef, nextTick } from 'vue'
-import { useState } from '../src/useState'
+import { useState, type StandardSchemaV1 } from '../src/useState'
 
 const KEY = 'test-key'
 
@@ -184,6 +184,86 @@ describe('parse', () => {
     const [state] = useState(0, { persist: true, storageKey: KEY, parse: asNumber, onError })
     expect(state.value).toBe(0)
     expect(onError).toHaveBeenCalledWith(expect.any(Error), 'read')
+  })
+})
+
+describe('schema', () => {
+  const stringSchema: StandardSchemaV1<unknown, string> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (value) =>
+        typeof value === 'string' ? { value } : { issues: [{ message: 'expected a string' }] }
+    }
+  }
+
+  it('restores values the schema accepts', () => {
+    localStorage.setItem(KEY, '"stored"')
+    const [state] = useState('init', { persist: true, storageKey: KEY, schema: stringSchema })
+    expect(state.value).toBe('stored')
+  })
+
+  it('falls back to the initial value on schema issues', () => {
+    localStorage.setItem(KEY, '42')
+    const [state] = useState('init', { persist: true, storageKey: KEY, schema: stringSchema })
+    expect(state.value).toBe('init')
+  })
+
+  it('uses the value the schema returns (transforms included)', () => {
+    const trimming: StandardSchemaV1<unknown, string> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (value) =>
+          typeof value === 'string'
+            ? { value: value.trim() }
+            : { issues: [{ message: 'expected a string' }] }
+      }
+    }
+    localStorage.setItem(KEY, '"  padded  "')
+    const [state] = useState('init', { persist: true, storageKey: KEY, schema: trimming })
+    expect(state.value).toBe('padded')
+  })
+
+  it('rejects async validation with a console.error and keeps the initial value', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const asyncSchema: StandardSchemaV1<unknown, string> = {
+      '~standard': {
+        version: 1,
+        vendor: 'test',
+        validate: (value) => Promise.resolve({ value: value as string })
+      }
+    }
+    localStorage.setItem(KEY, '"stored"')
+    const [state] = useState('init', { persist: true, storageKey: KEY, schema: asyncSchema })
+    expect(state.value).toBe('init')
+    expect(error).toHaveBeenCalledOnce()
+  })
+
+  it('wins over parse when both are given', () => {
+    const parse = vi.fn()
+    localStorage.setItem(KEY, '"stored"')
+    const [state] = useState('init', {
+      persist: true,
+      storageKey: KEY,
+      schema: stringSchema,
+      parse
+    })
+    expect(state.value).toBe('stored')
+    expect(parse).not.toHaveBeenCalled()
+  })
+
+  it('validates values coming from other tabs', () => {
+    const [state] = useState('init', {
+      persist: true,
+      storageKey: KEY,
+      syncTabs: true,
+      schema: stringSchema
+    })
+    fireStorage(KEY, '42')
+    expect(state.value).toBe('init')
+    fireStorage(KEY, '"ok"')
+    expect(state.value).toBe('ok')
   })
 })
 
