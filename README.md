@@ -1,6 +1,6 @@
 # vue-smart-state
 
-A type-safe, reactive, persistent and cross-tab synced `useState` composable for Vue 3 — derived from React's `useState`, grown up for real apps: TTL expiry, custom serializers, SSR safety and zero dependencies.
+A type-safe, reactive, persistent and cross-tab synced `useState` composable for Vue 3 — derived from React's `useState`, grown up for real apps: TTL expiry, versioned migrations, schema validation, custom storage (cookies included), SSR safety and zero dependencies.
 
 [![npm](https://img.shields.io/npm/v/vue-smart-state)](https://www.npmjs.com/package/vue-smart-state)
 [![ci](https://github.com/LuigiDavideMicca/vue-smart-state/actions/workflows/ci.yml/badge.svg)](https://github.com/LuigiDavideMicca/vue-smart-state/actions/workflows/ci.yml)
@@ -11,7 +11,7 @@ If you searched for *"React useState for Vue"*, *"Vue localStorage composable"*,
 
 ## Why
 
-Vue gives you `ref`. Real apps also need the boring parts around it: persisting to storage, restoring on load, staying in sync across tabs, expiring stale values, surviving SSR. `vue-smart-state` packs all of that behind one call, with full TypeScript inference.
+Vue gives you `ref`. Real apps also need the boring parts around it: persisting to storage, restoring on load, staying in sync across tabs, expiring stale values, migrating old shapes, validating what comes back, surviving SSR. `vue-smart-state` packs all of that behind one call, with full TypeScript inference.
 
 ## Installation
 
@@ -73,6 +73,107 @@ const [tags, setTags] = useState(new Set<string>(), {
 })
 ```
 
+## Validation
+
+Storage is user-editable — treat what comes back as untrusted. Pass any [Standard Schema](https://standardschema.dev) v1 schema (Zod 4, Valibot, ArkType, …) and invalid data falls back to the initial value, exactly like corrupt data would:
+
+```ts
+import { z } from 'zod'
+
+const Prefs = z.object({ theme: z.enum(['light', 'dark']), fontSize: z.number() })
+
+const [prefs, setPrefs] = useState({ theme: 'light', fontSize: 14 }, {
+  persist: true,
+  storageKey: 'prefs',
+  schema: Prefs // the state type is inferred from the schema
+})
+```
+
+The schema runs on hydration and on values arriving from other tabs. Only synchronous validation is supported — an async schema logs a `console.error` and keeps the initial value. No schema library? A plain guard works too:
+
+```ts
+const [count] = useState(0, {
+  persist: true,
+  storageKey: 'count',
+  parse: (value) => {
+    if (typeof value !== 'number') throw new Error('expected a number')
+    return value
+  }
+})
+```
+
+When both are given, `schema` wins and `parse` is ignored.
+
+## Versioned migrations
+
+Shipped a new shape for a persisted value? Bump `version` and migrate old data instead of breaking on it:
+
+```ts
+const [settings, setSettings] = useState({ theme: 'light', locale: 'en' }, {
+  persist: true,
+  storageKey: 'settings',
+  version: 2,
+  migrate: (value, fromVersion) => {
+    if (fromVersion === 0) return { theme: value as string, locale: 'en' } // pre-envelope
+    if (fromVersion === 1) return { ...(value as { theme: string }), locale: 'en' }
+    return undefined // unknown: discard and start fresh
+  }
+})
+```
+
+Values persisted before versioning existed are handed to `migrate` as version `0`. Without a `migrate` function, outdated values are discarded. Migration runs before validation, so your schema only ever sees the current shape.
+
+## Merging with defaults
+
+Added a new field to a persisted object? `mergeDefaults` fills the gaps in old data:
+
+```ts
+const [prefs] = useState({ theme: 'light', fontSize: 14 }, {
+  persist: true,
+  storageKey: 'prefs',
+  mergeDefaults: true // shallow: { ...defaults, ...stored }
+})
+```
+
+The merge is **shallow** and only happens when both the stored and the initial value are plain objects. Need deep or custom semantics? Pass a function: `mergeDefaults: (stored, defaults) => ({ ...defaults, ...stored, nested: { ...defaults.nested, ...stored.nested } })`. It runs after `parse`/`schema`/`migrate`.
+
+## Custom storage & cookies
+
+Anything with `getItem`/`setItem`/`removeItem` (synchronous) works as a backend via the `storage` option — it takes precedence over `storageType`:
+
+```ts
+import { useState, cookieStorage } from 'vue-smart-state'
+
+const [theme, setTheme] = useState('light', {
+  persist: true,
+  storageKey: 'theme',
+  storage: cookieStorage({ days: 365, sameSite: 'lax' }) // path, secure too
+})
+```
+
+`cookieStorage()` is SSR-safe: on the server `getItem` returns `null` and writes are no-ops. TTL, versioning and validation all work the same on top of it.
+
+### SSR without the flash (Nuxt recipe)
+
+Cookies travel with the request, so the server can render the *persisted* value instead of the initial one — no flash on hydration:
+
+```ts
+// composables/useTheme.ts
+import { useState as useSmartState, cookieStorage } from 'vue-smart-state'
+
+export const useTheme = () => {
+  // Server & client both start from the cookie Nuxt already parsed for us.
+  const initial = useCookie<'light' | 'dark'>('theme').value ?? 'light'
+  return useSmartState(initial, {
+    persist: true,
+    storageKey: 'theme',
+    storage: cookieStorage()
+  })
+}
+```
+
+Plain Vue SSR works the same way: read the cookie from the incoming request on the server, pass it as the initial value, and let `cookieStorage()` take over on the client.
+
 ## Cross-tab sync
 
 ```ts
@@ -84,6 +185,20 @@ const [cart, setCart] = useState([], {
 ```
 
 Changes in one tab appear in every other tab via the `storage` event. If another tab clears the key, the state falls back to the initial value. Listeners registered inside a component are removed with it; at module level (global stores) they live for the session — on purpose.
+
+### BroadcastChannel
+
+`storage` events only fire for `localStorage` writes. `syncTabs: 'broadcast'` syncs through a `BroadcastChannel` named `vss:<storageKey>` instead — it works with any storage backend (cookies included) and delivers the exact written payload:
+
+```ts
+const [cart, setCart] = useState([], {
+  persist: true,
+  storageKey: 'cart',
+  syncTabs: 'broadcast'
+})
+```
+
+The channel is closed when the owning component is unmounted. Where `BroadcastChannel` doesn't exist, it silently falls back to `storage` events. `syncTabs: 'storage'` is an explicit alias for `true`.
 
 ## Reset and clear
 
@@ -111,11 +226,17 @@ Safe out of the box: on the server (Nuxt, SSG builds) storage and window listene
 | `persist`     | `boolean`                                   | `false`        | Persist to web storage (requires `storageKey`).                         |
 | `storageKey`  | `string`                                    | `''`           | Storage key.                                                            |
 | `storageType` | `'local' \| 'session'`                      | `'local'`      | Which storage to use. Cross-tab sync only works with `'local'`.         |
+| `storage`     | `StorageLike`                               | —              | Custom storage backend (e.g. `cookieStorage()`); wins over `storageType`. |
 | `deepWatch`   | `boolean`                                   | `false`        | Persist nested mutations too.                                           |
-| `syncTabs`    | `boolean`                                   | `false`        | Sync the value across tabs.                                             |
+| `syncTabs`    | `boolean \| 'storage' \| 'broadcast'`       | `false`        | Sync across tabs via `storage` events or a `BroadcastChannel`.          |
 | `ttl`         | `number`                                    | —              | Milliseconds a persisted value stays fresh.                             |
 | `writeDebounce` | `number`                                  | —              | Debounce storage writes (pending writes flush on component unmount).    |
 | `serializer`  | `{ read(raw): T; write(value): string }`    | JSON           | Custom (de)serialization.                                               |
+| `schema`      | `StandardSchemaV1<unknown, T>`              | —              | Standard Schema (Zod 4, Valibot, ArkType…) validating restored data.    |
+| `parse`       | `(value: unknown) => T`                     | —              | Manual validation: return the value or throw. Ignored when `schema` is set. |
+| `version`     | `number`                                    | —              | Schema version of the persisted value.                                  |
+| `migrate`     | `(value, fromVersion) => T \| undefined`    | —              | Upgrade older persisted values; `undefined` discards them.              |
+| `mergeDefaults` | `boolean \| (stored, defaults) => T`      | `false`        | Shallow-merge stored plain objects over the defaults, or custom merge.  |
 | `onError`     | `(error, context) => void`                  | `console.warn` | Called on read/write/sync failures (e.g. quota exceeded).               |
 
 ## Debounced writes
@@ -132,18 +253,25 @@ const [draft, setDraft] = useState('', {
 
 ## How it compares
 
-| Capability                          | `vue-smart-state` | `@vueuse/core` `useStorage` | plain `ref` + DIY |
-| ----------------------------------- | :---------------: | :-------------------------: | :---------------: |
-| React-style `[value, set]` tuple    | ✅                | ❌ (single ref)             | ❌                |
-| Functional updater `set(v => …)`    | ✅                | ❌                          | ❌                |
-| Persist + restore (local/session)   | ✅                | ✅                          | manual            |
-| Cross-tab sync                      | ✅                | ✅                          | manual            |
-| TTL / expiry of persisted values    | ✅                | ❌                          | manual            |
-| `reset()` / `clear()` controls      | ✅                | partial                     | manual            |
-| Debounced writes with unmount flush | ✅                | via extra composable        | manual            |
-| Dependencies                        | 0                 | part of a large suite       | —                 |
+| Capability                          | `vue-smart-state` | `@vueuse/core` `useStorage` | `pinia-plugin-persistedstate` |
+| ----------------------------------- | :---------------: | :-------------------------: | :---------------------------: |
+| Bundle size (min+gzip)              | ~2 kB, 0 deps     | tree-shakeable, part of a large suite | small, requires Pinia |
+| React-style tuple + functional updater | ✅             | ❌ (single ref)             | ❌ (store plugin)             |
+| TTL / expiry of persisted values    | ✅                | ❌                          | ❌                            |
+| Versioned migrations                | ✅                | ❌                          | ❌                            |
+| Schema validation (Standard Schema) | ✅                | ❌                          | ❌                            |
+| Integrated debounced writes         | ✅ (unmount flush) | via extra composable       | ❌                            |
+| Cross-tab sync                      | ✅ storage + BroadcastChannel | ✅ storage events | ❌                            |
+| Custom storage backend              | ✅                | ✅                          | ✅                            |
+| Custom serializers                  | ✅                | ✅                          | ✅                            |
+| Cookie storage / SSR no-flash recipe | ✅ `cookieStorage()` | ❌ in core (Nuxt `useCookie` separately) | ✅ via its Nuxt module |
+| `mergeDefaults`                     | ✅                | ✅                          | ❌ (hydration hooks instead)  |
 
-`@vueuse/core` is a great toolbelt — if you already use it and don't need TTL, tuples or updaters, it's a fine choice. `vue-smart-state` is for when you want exactly this, tiny and typed.
+`@vueuse/core` is a great toolbelt and `pinia-plugin-persistedstate` is the natural pick when your state already lives in Pinia stores. `vue-smart-state`'s edge is the combination: TTL, migrations, validation and debounced writes behind one React-style call, tiny and typed.
+
+## Cross-framework interop
+
+`vue-smart-state` shares its persisted format with its siblings [`smart-state`](https://github.com/LuigiDavideMicca/smart-state) (React) and [`nuxt-smart-state`](https://github.com/LuigiDavideMicca/nuxt-smart-state): plain JSON when no TTL/version is set, and the envelope `{ "__vss": 1, "value": "...", "expires": …, "v": … }` otherwise. That envelope is a hard invariant across the family — a React app and a Vue app on the same origin (say, during an incremental migration) can share persisted state, TTLs and versions out of the box, in both directions.
 
 ## As a plugin
 
