@@ -34,6 +34,12 @@ export interface UseStateOptions<T> {
   writeDebounce?: number
   /** Custom (de)serialization; defaults to JSON. */
   serializer?: Serializer<T>
+  /** Validate untrusted data from storage or other tabs: return the value or throw. */
+  parse?: (value: unknown) => T
+  /** Schema version of the persisted value. Bump it when the shape changes. */
+  version?: number
+  /** Upgrade values persisted with an older version; return undefined to discard them. */
+  migrate?: (value: unknown, fromVersion: number) => T | undefined
   /** Called instead of `console.warn` when reading, writing or syncing fails. */
   onError?: (error: unknown, context: 'read' | 'write' | 'sync') => void
 }
@@ -49,12 +55,19 @@ export interface UseStateControls {
 
 export type UseStateReturn<T> = [Ref<UnwrapRef<T>>, SetState<T>, UseStateControls]
 
-/** Persisted envelope used when a TTL is set. Plain legacy values keep working. */
+/** Persisted envelope used when a TTL or version is set. Plain legacy values keep working. */
 interface Envelope {
   __vss: 1
   value: string
   expires?: number
+  v?: number
 }
+
+const isEnvelope = (parsed: unknown): parsed is Envelope =>
+  typeof parsed === 'object' &&
+  parsed !== null &&
+  (parsed as { __vss?: unknown }).__vss === 1 &&
+  typeof (parsed as { value?: unknown }).value === 'string'
 
 const isClient = typeof window !== 'undefined'
 
@@ -74,6 +87,9 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     ttl,
     writeDebounce,
     serializer = defaultSerializer<T>(),
+    parse,
+    version,
+    migrate,
     onError = (error, context) =>
       console.warn(`[vue-smart-state] ${context} failed for key "${storageKey}"`, error)
   } = options
@@ -92,23 +108,33 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     : undefined
 
   const decode = (raw: string): T | undefined => {
+    let payload = raw
+    let fromVersion = 0
     try {
       const parsed: unknown = JSON.parse(raw)
-      if (parsed !== null && typeof parsed === 'object' && (parsed as Envelope).__vss === 1) {
-        const envelope = parsed as Envelope
-        if (envelope.expires !== undefined && Date.now() > envelope.expires) return undefined
-        return serializer.read(envelope.value)
+      if (isEnvelope(parsed)) {
+        if (parsed.expires !== undefined && Date.now() > parsed.expires) return undefined
+        payload = parsed.value
+        fromVersion = parsed.v ?? 0
       }
     } catch {
-      // not an envelope (or not JSON at all): fall through to the raw value
+      // not an envelope (or not JSON at all): fall through with version 0
     }
-    return serializer.read(raw)
+    let value: unknown = serializer.read(payload)
+    if (version !== undefined && fromVersion !== version) {
+      if (!migrate) return undefined
+      value = migrate(value, fromVersion)
+      if (value === undefined) return undefined
+    }
+    return parse ? parse(value) : (value as T)
   }
 
   const encode = (value: T): string => {
     const written = serializer.write(value)
-    if (ttl === undefined) return written
-    const envelope: Envelope = { __vss: 1, value: written, expires: Date.now() + ttl }
+    if (ttl === undefined && version === undefined) return written
+    const envelope: Envelope = { __vss: 1, value: written }
+    if (ttl !== undefined) envelope.expires = Date.now() + ttl
+    if (version !== undefined) envelope.v = version
     return JSON.stringify(envelope)
   }
 

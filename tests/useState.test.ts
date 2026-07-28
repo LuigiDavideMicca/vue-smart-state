@@ -118,6 +118,75 @@ describe('ttl', () => {
   })
 })
 
+describe('versioned migrations', () => {
+  it('writes an envelope carrying the version', async () => {
+    const [, set] = useState('a', { persist: true, storageKey: KEY, version: 2 })
+    set('b')
+    await nextTick()
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual({ __vss: 1, value: '"b"', v: 2 })
+  })
+
+  it('migrates values persisted with an older version', () => {
+    localStorage.setItem(KEY, JSON.stringify({ __vss: 1, value: '"old"', v: 1 }))
+    const [state] = useState('init', {
+      persist: true,
+      storageKey: KEY,
+      version: 2,
+      migrate: (value, fromVersion) => `${value as string}@${fromVersion}`
+    })
+    expect(state.value).toBe('old@1')
+  })
+
+  it('treats plain legacy values as version 0', () => {
+    localStorage.setItem(KEY, '"legacy"')
+    const [state] = useState('init', {
+      persist: true,
+      storageKey: KEY,
+      version: 1,
+      migrate: (value, fromVersion) => (fromVersion === 0 ? `${value as string}!` : undefined)
+    })
+    expect(state.value).toBe('legacy!')
+  })
+
+  it('discards outdated values without a migrate function', () => {
+    localStorage.setItem(KEY, JSON.stringify({ __vss: 1, value: '"old"', v: 1 }))
+    const [state] = useState('init', { persist: true, storageKey: KEY, version: 2 })
+    expect(state.value).toBe('init')
+  })
+
+  it('discards values the migration refuses', () => {
+    localStorage.setItem(KEY, JSON.stringify({ __vss: 1, value: '"old"', v: 1 }))
+    const [state] = useState('init', {
+      persist: true,
+      storageKey: KEY,
+      version: 2,
+      migrate: () => undefined
+    })
+    expect(state.value).toBe('init')
+  })
+})
+
+describe('parse', () => {
+  const asNumber = (value: unknown): number => {
+    if (typeof value !== 'number') throw new Error('not a number')
+    return value
+  }
+
+  it('accepts values the parser returns', () => {
+    localStorage.setItem(KEY, '5')
+    const [state] = useState(0, { persist: true, storageKey: KEY, parse: asNumber })
+    expect(state.value).toBe(5)
+  })
+
+  it('falls back to the initial value when the parser throws', () => {
+    const onError = vi.fn()
+    localStorage.setItem(KEY, '"nope"')
+    const [state] = useState(0, { persist: true, storageKey: KEY, parse: asNumber, onError })
+    expect(state.value).toBe(0)
+    expect(onError).toHaveBeenCalledWith(expect.any(Error), 'read')
+  })
+})
+
 describe('writeDebounce', () => {
   it('delays the write and coalesces rapid changes', async () => {
     vi.useFakeTimers()
