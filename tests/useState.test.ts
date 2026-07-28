@@ -17,6 +17,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -423,6 +424,84 @@ describe('cross-tab sync', () => {
     })
     scope.stop()
     update!()
+  })
+})
+
+describe('broadcast sync', () => {
+  class FakeBroadcastChannel {
+    static instances: FakeBroadcastChannel[] = []
+    onmessage: ((event: { data: unknown }) => void) | null = null
+    closed = false
+    constructor(readonly name: string) {
+      FakeBroadcastChannel.instances.push(this)
+    }
+    postMessage(data: unknown) {
+      for (const other of FakeBroadcastChannel.instances) {
+        if (other === this || other.closed || other.name !== this.name) continue
+        other.onmessage?.({ data })
+      }
+    }
+    close() {
+      this.closed = true
+    }
+  }
+
+  beforeEach(() => {
+    FakeBroadcastChannel.instances = []
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+  })
+
+  it('opens a channel named after the storage key', () => {
+    useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    expect(FakeBroadcastChannel.instances.map((c) => c.name)).toEqual([`vss:${KEY}`])
+  })
+
+  it('propagates writes to other instances on the same channel', async () => {
+    const [, set] = useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    const [other] = useState('a', { persist: true, storageKey: `${KEY}-2`, syncTabs: 'broadcast' })
+    const [peer] = useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    set('b')
+    await nextTick()
+    expect(peer.value).toBe('b')
+    expect(other.value).toBe('a')
+  })
+
+  it('resets peers to the initial value on clear()', async () => {
+    const [, set, { clear }] = useState('a', {
+      persist: true,
+      storageKey: KEY,
+      syncTabs: 'broadcast'
+    })
+    const [peer] = useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    set('b')
+    await nextTick()
+    expect(peer.value).toBe('b')
+    clear()
+    expect(peer.value).toBe('a')
+  })
+
+  it('closes the channel when the effect scope is disposed', () => {
+    const scope = effectScope()
+    scope.run(() => {
+      useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    })
+    expect(FakeBroadcastChannel.instances[0]!.closed).toBe(false)
+    scope.stop()
+    expect(FakeBroadcastChannel.instances[0]!.closed).toBe(true)
+  })
+
+  it('falls back to storage events when BroadcastChannel is unavailable', () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+    const [name] = useState('a', { persist: true, storageKey: KEY, syncTabs: 'broadcast' })
+    fireStorage(KEY, '"from-other-tab"')
+    expect(name.value).toBe('from-other-tab')
+  })
+
+  it("treats syncTabs 'storage' like true and opens no channel", () => {
+    const [name] = useState('a', { persist: true, storageKey: KEY, syncTabs: 'storage' })
+    fireStorage(KEY, '"other"')
+    expect(name.value).toBe('other')
+    expect(FakeBroadcastChannel.instances).toHaveLength(0)
   })
 })
 

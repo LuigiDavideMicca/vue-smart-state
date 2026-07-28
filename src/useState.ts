@@ -50,8 +50,12 @@ export interface UseStateOptions<T> {
   storage?: StorageLike
   /** Watch nested mutations and persist them too. */
   deepWatch?: boolean
-  /** Keep the value in sync across browser tabs via the `storage` event. */
-  syncTabs?: boolean
+  /**
+   * Keep the value in sync across browser tabs: `true` or `'storage'` via the
+   * `storage` event, `'broadcast'` via a `BroadcastChannel` named
+   * `vss:<storageKey>` (falls back to storage events where unavailable).
+   */
+  syncTabs?: boolean | 'storage' | 'broadcast'
   /** Milliseconds a persisted value stays fresh; expired values fall back to the initial value. */
   ttl?: number
   /** Debounce persisted writes by this many ms (great for text inputs). Sync stays instant. */
@@ -207,6 +211,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
   const state = (shallow ? shallowRef(value) : ref(value)) as Ref<UnwrapRef<T>>
 
   let lastWritten: string | undefined
+  let channel: BroadcastChannel | undefined
 
   const write = (val: unknown) => {
     if (!storage) return
@@ -215,6 +220,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
       if (raw === lastWritten) return
       lastWritten = raw
       storage.setItem(storageKey, raw)
+      channel?.postMessage(raw)
     } catch (error) {
       onError(error, 'write')
     }
@@ -255,27 +261,40 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     }
   }
 
-  if (storage && syncTabs && isClient) {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== storageKey || event.storageArea !== storage) return
-      if (event.newValue === null) {
+  if (storage && syncTabs !== false && syncTabs !== undefined) {
+    const applyExternal = (raw: string | null) => {
+      if (raw === null) {
         state.value = initialValue as UnwrapRef<T>
         return
       }
-      if (event.newValue === lastWritten) return
+      if (raw === lastWritten) return
       try {
-        const decoded = decode(event.newValue)
-        lastWritten = event.newValue
+        const decoded = decode(raw)
+        lastWritten = raw
         state.value = (decoded === undefined ? initialValue : decoded) as UnwrapRef<T>
       } catch (error) {
         onError(error, 'sync')
       }
     }
-    window.addEventListener('storage', onStorage)
-    // Inside a component/effect scope the listener dies with it; at module
-    // level (global stores) it intentionally lives for the session.
-    if (getCurrentScope()) {
-      onScopeDispose(() => window.removeEventListener('storage', onStorage))
+
+    // Inside a component/effect scope the listener/channel dies with it; at
+    // module level (global stores) it intentionally lives for the session.
+    if (syncTabs === 'broadcast' && typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(`vss:${storageKey}`)
+      channel = bc
+      bc.onmessage = (event: MessageEvent<string | null>) => applyExternal(event.data)
+      if (getCurrentScope()) {
+        onScopeDispose(() => bc.close())
+      }
+    } else if (isClient) {
+      const onStorage = (event: StorageEvent) => {
+        if (event.key !== storageKey || event.storageArea !== storage) return
+        applyExternal(event.newValue)
+      }
+      window.addEventListener('storage', onStorage)
+      if (getCurrentScope()) {
+        onScopeDispose(() => window.removeEventListener('storage', onStorage))
+      }
     }
   }
 
@@ -295,6 +314,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
       cancelPendingWrite()
       try {
         storage?.removeItem(storageKey)
+        channel?.postMessage(null)
       } catch (error) {
         onError(error, 'write')
       }
