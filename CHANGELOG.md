@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/LuigiDavideMicca/vue-smart-state/compare/v0.2.0...v0.2.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **ci:** upgrade npm for the oidc token exchange ([9c2c6a7](https://github.com/LuigiDavideMicca/vue-smart-state/commit/9c2c6a7987e2b8838443d8fec4e0a366a4199add))
+
 ## [0.2.0](https://github.com/LuigiDavideMicca/vue-smart-state/compare/vue-smart-state-v0.1.0...vue-smart-state-v0.2.0) (2026-07-28)
 
 
