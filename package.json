@@ -1,6 +1,6 @@
 {
   "name": "vue-smart-state",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A type-safe, reactive, persistent and cross-tab synced useState composable for Vue 3 — with TTL, versioned migrations, schema validation, custom storage (cookies included) and SSR safety.",
   "type": "module",
   "main": "./dist/index.cjs",
