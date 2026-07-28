@@ -294,6 +294,39 @@ describe('writeDebounce', () => {
   })
 })
 
+describe('custom storage', () => {
+  const memoryStorage = () => {
+    const data = new Map<string, string>()
+    return {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => void data.set(key, value),
+      removeItem: (key: string) => void data.delete(key),
+      data
+    }
+  }
+
+  it('reads and writes through the provided storage instead of web storage', async () => {
+    const storage = memoryStorage()
+    storage.setItem(KEY, '"stored"')
+    const [state, set] = useState('init', { persist: true, storageKey: KEY, storage })
+    expect(state.value).toBe('stored')
+    set('next')
+    await nextTick()
+    expect(storage.getItem(KEY)).toBe('"next"')
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('clear() removes the entry from the provided storage', async () => {
+    const storage = memoryStorage()
+    const [, set, { clear }] = useState('init', { persist: true, storageKey: KEY, storage })
+    set('next')
+    await nextTick()
+    expect(storage.data.size).toBe(1)
+    clear()
+    expect(storage.data.size).toBe(0)
+  })
+})
+
 describe('custom serializer', () => {
   it('round-trips through the provided serializer', async () => {
     const serializer = {

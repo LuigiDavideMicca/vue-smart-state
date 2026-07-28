@@ -11,6 +11,13 @@ import {
 
 type StorageType = 'local' | 'session'
 
+/** Anything with the synchronous subset of the Web Storage API. */
+export interface StorageLike {
+  getItem: (key: string) => string | null
+  setItem: (key: string, value: string) => void
+  removeItem: (key: string) => void
+}
+
 export interface Serializer<T> {
   read: (raw: string) => T
   write: (value: T) => string
@@ -39,6 +46,8 @@ export interface UseStateOptions<T> {
   storageKey?: string
   /** `local` (default) or `session`. Cross-tab sync only works with `local`. */
   storageType?: StorageType
+  /** Custom storage (cookies, memory, …); takes precedence over `storageType`. */
+  storage?: StorageLike
   /** Watch nested mutations and persist them too. */
   deepWatch?: boolean
   /** Keep the value in sync across browser tabs via the `storage` event. */
@@ -99,6 +108,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     persist = false,
     storageKey = '',
     storageType = 'local',
+    storage: customStorage,
     deepWatch = false,
     syncTabs = false,
     ttl,
@@ -112,7 +122,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
       console.warn(`[vue-smart-state] ${context} failed for key "${storageKey}"`, error)
   } = options
 
-  const persisting = persist && storageKey !== '' && isClient
+  const persisting = persist && storageKey !== '' && (customStorage !== undefined || isClient)
   if (persist && storageKey === '' && isClient) {
     console.warn(
       '[vue-smart-state] `persist` is on but `storageKey` is empty — nothing will be stored'
@@ -120,9 +130,8 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
   }
 
   const storage = persisting
-    ? storageType === 'local'
-      ? window.localStorage
-      : window.sessionStorage
+    ? (customStorage ??
+      (storageType === 'local' ? window.localStorage : window.sessionStorage))
     : undefined
 
   const decode = (raw: string): T | undefined => {
@@ -231,7 +240,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     }
   }
 
-  if (storage && syncTabs) {
+  if (storage && syncTabs && isClient) {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== storageKey || event.storageArea !== storage) return
       if (event.newValue === null) {
