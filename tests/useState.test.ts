@@ -294,6 +294,54 @@ describe('writeDebounce', () => {
   })
 })
 
+describe('mergeDefaults', () => {
+  it('shallow-merges stored objects over the defaults with `true`', () => {
+    localStorage.setItem(KEY, JSON.stringify({ theme: 'dark' }))
+    const [state] = useState(
+      { theme: 'light', fontSize: 14 },
+      { persist: true, storageKey: KEY, mergeDefaults: true }
+    )
+    expect(state.value).toEqual({ theme: 'dark', fontSize: 14 })
+  })
+
+  it('accepts a custom merge function', () => {
+    localStorage.setItem(KEY, JSON.stringify({ tags: ['b'] }))
+    const [state] = useState(
+      { tags: ['a'] },
+      {
+        persist: true,
+        storageKey: KEY,
+        mergeDefaults: (stored, defaults) => ({ tags: [...defaults.tags, ...stored.tags] })
+      }
+    )
+    expect(state.value).toEqual({ tags: ['a', 'b'] })
+  })
+
+  it('skips merging when the stored value is not a plain object', () => {
+    localStorage.setItem(KEY, JSON.stringify(['not', 'an', 'object']))
+    const [state] = useState<unknown>(
+      { theme: 'light' },
+      { persist: true, storageKey: KEY, mergeDefaults: true }
+    )
+    expect(state.value).toEqual(['not', 'an', 'object'])
+  })
+
+  it('runs after migrate', () => {
+    localStorage.setItem(KEY, JSON.stringify({ __vss: 1, value: '{"theme":"dark"}', v: 1 }))
+    const [state] = useState(
+      { theme: 'light', fontSize: 14 },
+      {
+        persist: true,
+        storageKey: KEY,
+        version: 2,
+        migrate: (value) => value as { theme: string; fontSize: number },
+        mergeDefaults: true
+      }
+    )
+    expect(state.value).toEqual({ theme: 'dark', fontSize: 14 })
+  })
+})
+
 describe('custom storage', () => {
   const memoryStorage = () => {
     const data = new Map<string, string>()

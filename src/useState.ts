@@ -66,6 +66,11 @@ export interface UseStateOptions<T> {
   version?: number
   /** Upgrade values persisted with an older version; return undefined to discard them. */
   migrate?: (value: unknown, fromVersion: number) => T | undefined
+  /**
+   * Merge stored plain objects over the initial one after parse/schema/migrate:
+   * `true` for a shallow `{ ...defaults, ...stored }`, or a custom merge function.
+   */
+  mergeDefaults?: boolean | ((stored: T, defaults: T) => T)
   /** Called instead of `console.warn` when reading, writing or syncing fails. */
   onError?: (error: unknown, context: 'read' | 'write' | 'sync') => void
 }
@@ -97,6 +102,9 @@ const isEnvelope = (parsed: unknown): parsed is Envelope =>
 
 const isClient = typeof window !== 'undefined'
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  Object.prototype.toString.call(value) === '[object Object]'
+
 const defaultSerializer = <T>(): Serializer<T> => ({
   read: (raw) => JSON.parse(raw) as T,
   write: (value) => JSON.stringify(value)
@@ -118,6 +126,7 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     schema,
     version,
     migrate,
+    mergeDefaults = false,
     onError = (error, context) =>
       console.warn(`[vue-smart-state] ${context} failed for key "${storageKey}"`, error)
   } = options
@@ -133,6 +142,12 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     ? (customStorage ??
       (storageType === 'local' ? window.localStorage : window.sessionStorage))
     : undefined
+
+  const withDefaults = (stored: T): T => {
+    if (!mergeDefaults || !isPlainObject(stored) || !isPlainObject(initialValue)) return stored
+    if (mergeDefaults === true) return { ...initialValue, ...stored } as T
+    return mergeDefaults(stored, initialValue)
+  }
 
   const decode = (raw: string): T | undefined => {
     let payload = raw
@@ -162,9 +177,9 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
         return undefined
       }
       if (result.issues) return undefined
-      return result.value
+      return withDefaults(result.value)
     }
-    return parse ? parse(value) : (value as T)
+    return withDefaults(parse ? parse(value) : (value as T))
   }
 
   const encode = (value: T): string => {
