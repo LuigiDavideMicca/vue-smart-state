@@ -73,6 +73,8 @@ const [tags, setTags] = useState(new Set<string>(), {
 })
 ```
 
+`write` must be deterministic — the same value always gives the same string. That is how a value arriving from another tab is recognised and not written back.
+
 ## Validation
 
 Storage is user-editable — treat what comes back as untrusted. Pass any [Standard Schema](https://standardschema.dev) v1 schema (Zod 4, Valibot, ArkType, …) and invalid data falls back to the initial value, exactly like corrupt data would:
@@ -233,7 +235,7 @@ Setting `undefined` removes the entry instead of storing it: instances in the sa
 
 On the server (Nuxt, SSG builds) storage, window listeners and cross-tab channels are skipped, and the state starts from the initial value. Two things are yours to decide:
 
-**Hydration.** The server cannot see `localStorage`, so it renders the initial value. By default the client reads storage during setup — right for client-only apps, where it means no flash — which in a server-rendered app makes the first client render differ from the server's HTML. Pass `hydrate: 'mounted'` there: the page hydrates with the initial value and switches to the stored one right after mount, without a mismatch. For values the server must render correctly from the first byte, store them in a cookie and pass the server-read value as the initial value (see the cookie recipe above).
+**Hydration.** The server cannot see `localStorage`, so it renders the initial value. By default the client reads storage during setup — right for client-only apps, where it means no flash — which in a server-rendered app makes the first client render differ from the server's HTML. Pass `hydrate: 'mounted'` there: the page hydrates with the initial value and switches to the stored one right after mount, without a mismatch. Set the state from `onMounted`, not from `setup()`: in this mode the stored value is read at mount and replaces a value set during setup (a warning says so), so that a stored value is never overwritten before it was read. For values the server must render correctly from the first byte, store them in a cookie and pass the server-read value as the initial value (see the cookie recipe above).
 
 **Isolation.** State created inside `setup()` belongs to one component instance, hence to one request. A store created at module level is one object shared by every request the server handles — fine in the browser, a data leak on the server. Keep per-user state inside `setup()` (or a Pinia/Nuxt per-request store) in server-rendered apps.
 

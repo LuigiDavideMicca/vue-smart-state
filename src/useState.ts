@@ -7,6 +7,7 @@ import {
   getCurrentInstance,
   onScopeDispose,
   onMounted,
+  onBeforeMount,
   type Ref,
   type UnwrapRef
 } from 'vue'
@@ -290,24 +291,32 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
 
   // What storage holds for this key as far as this instance knows, as the
   // serializer's payload - not the stored envelope, whose ttl expiry differs on
-  // every encode. A state whose payload matches it is not written: a value that
-  // came from outside (another tab, a same-tab peer, clear(), a removal) is
-  // never written back - that re-created removed keys, undid clear(), and
-  // with a ttl bounced between tabs forever - while any real edit, deep or
-  // not, made in the same tick still differs and is written.
+  // every encode. Without a ttl a state matching it has nothing to write.
   let known: { payload: string | undefined; removed?: boolean } | undefined
   const payloadOf = (val: unknown): string | undefined =>
     val === undefined ? undefined : serializer.write(toRaw(val) as T)
-  if (readValue !== undefined) known = { payload: payloadOf(readValue) }
+  const tryPayload = (val: unknown): { payload: string | undefined } | undefined => {
+    try {
+      return { payload: payloadOf(val) }
+    } catch (error) {
+      onError(error, 'write')
+      return undefined
+    }
+  }
+  if (readValue !== undefined) known = tryPayload(readValue)
 
   let channel: BroadcastChannel | undefined
   const samePeers = isClient && storage ? peersOf(storage, storageKey) : undefined
 
-  // assignments made by this instance itself, so the mounted read can tell a
-  // write that happened before it (a child's onMounted) from the default
+  // A value that came from outside - another tab, a same-tab peer, clear(),
+  // a removal - is already what storage holds and must not be written back:
+  // that re-created removed keys, undid clear(), and with a ttl bounced
+  // between tabs forever. The watcher skips exactly that payload, once; a real
+  // edit made in the same tick, deep or not, differs and is written.
+  let quietPayload: { payload: string | undefined } | undefined
   let quiet = false
-  let touched = false
   const assignQuietly = (next: unknown) => {
+    quietPayload = tryPayload(next)
     quiet = true
     state.value = next as UnwrapRef<T>
     quiet = false
@@ -331,8 +340,8 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
         return
       }
       const payload = payloadOf(val)
-      if (known && !known.removed && known.payload === payload) return
-      if (known?.removed && known.payload === payload) return
+      // with a ttl an equal value is written anyway: it renews the expiry
+      if (ttl === undefined && known && known.payload === payload) return
       const raw = encode(toRaw(val) as T)
       storage.setItem(storageKey, raw)
       known = { payload }
@@ -356,16 +365,17 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
   }
 
   const applyExternal = (raw: string | null) => {
+    cancelPendingWrite()
     if (raw === null) {
       const fresh = freshDefaults()
-      known = { payload: payloadOf(fresh), removed: true }
+      known = { payload: tryPayload(fresh)?.payload, removed: true }
       assignQuietly(fresh)
       return
     }
     try {
       const decoded = decode(raw)
       const next = decoded === undefined ? freshDefaults() : decoded
-      known = { payload: payloadOf(next) }
+      known = tryPayload(next)
       assignQuietly(next)
     } catch (error) {
       onError(error, 'sync')
@@ -383,11 +393,37 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     applyExternal(message.raw)
   }
 
+  // with hydrate: 'mounted', nothing is persisted before the stored value has
+  // been read - a write from setup would have replaced it - except a write
+  // made after setup, such as a child's onMounted, which is newer than storage
+  let mountedRead = !deferRead
+  let touchedAfterSetup = false
+
   if (storage) {
     watch(
       state,
       (val) => {
-        if (known && known.payload === payloadOf(val)) return
+        const current = tryPayload(val)
+        if (!current) return
+        if (quietPayload && quietPayload.payload === current.payload) {
+          quietPayload = undefined
+          return
+        }
+        quietPayload = undefined
+        if (!mountedRead && !touchedAfterSetup) return
+        if (ttl === undefined && known && known.payload === current.payload) {
+          // an edit reverted before its debounced write: storage is right,
+          // the peers that were told about the edit are not
+          if (writeTimer !== undefined) {
+            cancelPendingWrite()
+            try {
+              notify(val === undefined ? { raw: null, unset: true } : { raw: encode(toRaw(val) as T) })
+            } catch (error) {
+              onError(error, 'sync')
+            }
+          }
+          return
+        }
         if (writeDebounce === undefined) {
           write(val)
           return
@@ -432,20 +468,32 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     }
 
     if (deferRead) {
-      watch(
+      let setupDone = false
+      // synchronous only until mount, then stopped: a deep sync watcher left
+      // running walked the whole state on every single mutation
+      const stopTracking = watch(
         state,
         () => {
-          if (!quiet) touched = true
+          if (!quiet && setupDone) touchedAfterSetup = true
         },
         { flush: 'sync', deep: deepWatch }
       )
+      onBeforeMount(() => {
+        setupDone = true
+      })
       onMounted(() => {
-        // a write made before mount - a child's onMounted runs first - is
-        // newer than storage and already on its way there: keep it
-        if (touched) return
+        stopTracking()
+        mountedRead = true
+        if (touchedAfterSetup) return
         const stored = readStored()
         if (stored === undefined) return
-        known = { payload: payloadOf(stored) }
+        const setupWrote = tryPayload(state.value)?.payload !== tryPayload(defaults)?.payload
+        if (setupWrote) {
+          console.warn(
+            `[vue-smart-state] "${storageKey}" was set during setup with hydrate: 'mounted' — the stored value replaces it at mount; set it in onMounted instead`
+          )
+        }
+        known = tryPayload(stored)
         assignQuietly(stored)
       })
     }

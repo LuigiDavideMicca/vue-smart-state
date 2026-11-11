@@ -71,7 +71,8 @@ describe('V2 hydrate mounted: writes before the parent mounts', () => {
     expect(localStorage.getItem('v2')).toBe('"child-wrote"')
   })
 
-  it('a write in setup right after useState survives the mounted hydration', async () => {
+  it('a write in setup never destroys the stored value: it wins at mount, with a warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     localStorage.setItem('v2b', '"stored"')
     let stateRef: { value: string } | undefined
     const App = defineComponent({
@@ -84,8 +85,9 @@ describe('V2 hydrate mounted: writes before the parent mounts', () => {
     })
     createApp(App).mount(document.createElement('div'))
     await flush()
-    console.log('v2b state', stateRef!.value, 'storage', localStorage.getItem('v2b'))
-    expect([stateRef!.value, localStorage.getItem('v2b')]).toEqual(['setup-wrote', '"setup-wrote"'])
+    expect([stateRef!.value, localStorage.getItem('v2b')]).toEqual(['stored', '"stored"'])
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
   })
 })
 
