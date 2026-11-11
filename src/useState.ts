@@ -132,15 +132,25 @@ const defaultSerializer = <T>(): Serializer<T> => ({
 /**
  * A fresh copy of the defaults, so state never aliases the caller's object:
  * deep edits used to write into the defaults themselves, breaking `reset()`
- * and leaking between stores built from one constant.
+ * and leaking between stores built from one constant. Only plain objects and
+ * arrays are copied; class instances, functions and markRaw objects are kept
+ * as they are, prototype and all (structuredClone turned a class instance
+ * into a plain object and dropped markRaw).
  */
 const cloneDefaults = <T>(value: T): T => {
-  if (value === null || typeof value !== 'object') return value
-  try {
-    return structuredClone(toRaw(value))
-  } catch {
-    return value
+  const raw = toRaw(value) as unknown
+  if (Array.isArray(raw)) return raw.map(cloneDefaults) as T
+  const proto = raw !== null && typeof raw === 'object' ? Object.getPrototypeOf(raw) : undefined
+  if (
+    (proto === Object.prototype || proto === null) &&
+    !(raw as { __v_skip?: boolean }).__v_skip
+  ) {
+    const source = raw as Record<string, unknown>
+    const copy: Record<string, unknown> = {}
+    for (const key of Object.keys(source)) copy[key] = cloneDefaults(source[key])
+    return copy as T
   }
+  return raw as T
 }
 
 /**
@@ -149,7 +159,9 @@ const cloneDefaults = <T>(value: T): T => {
  * using one key drifted apart. Client only: on the server it would outlive the
  * request.
  */
-type Peer = (raw: string | null) => void
+/** removal, a stored value, or undefined set by a peer (not the defaults) */
+type PeerMessage = { raw: string | null; unset?: true }
+type Peer = (message: PeerMessage) => void
 const peers = new WeakMap<StorageLike, Map<string, Set<Peer>>>()
 
 const peersOf = (storage: StorageLike, key: string): Set<Peer> => {
@@ -268,32 +280,42 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
 
   const deferRead = hydrate === 'mounted' && getCurrentInstance() !== null
   let value = freshDefaults()
+  let readValue: T | undefined
   if (!deferRead) {
-    const stored = readStored()
-    if (stored !== undefined) value = stored
+    readValue = readStored()
+    if (readValue !== undefined) value = readValue
   }
 
   const state = (shallow ? shallowRef(value) : ref(value)) as Ref<UnwrapRef<T>>
 
-  // what storage holds as far as this instance knows: a string written or
-  // read, null once removed, undefined before anything happened
-  let lastWritten: string | null | undefined
+  // What storage holds for this key as far as this instance knows, as the
+  // serializer's payload - not the stored envelope, whose ttl expiry differs on
+  // every encode. A state whose payload matches it is not written: a value that
+  // came from outside (another tab, a same-tab peer, clear(), a removal) is
+  // never written back - that re-created removed keys, undid clear(), and
+  // with a ttl bounced between tabs forever - while any real edit, deep or
+  // not, made in the same tick still differs and is written.
+  let known: { payload: string | undefined; removed?: boolean } | undefined
+  const payloadOf = (val: unknown): string | undefined =>
+    val === undefined ? undefined : serializer.write(toRaw(val) as T)
+  if (readValue !== undefined) known = { payload: payloadOf(readValue) }
+
   let channel: BroadcastChannel | undefined
   const samePeers = isClient && storage ? peersOf(storage, storageKey) : undefined
 
-  // A value that came from outside - another tab, a same-tab peer, clear(),
-  // a removal - is already what storage holds. The watcher must not write it
-  // back: that re-created removed keys, undid clear(), and with a TTL (whose
-  // envelope differs on every encode) bounced between tabs forever.
-  let applied: { value: unknown } | undefined
-  const applyQuietly = (next: unknown) => {
-    applied = { value: next }
+  // assignments made by this instance itself, so the mounted read can tell a
+  // write that happened before it (a child's onMounted) from the default
+  let quiet = false
+  let touched = false
+  const assignQuietly = (next: unknown) => {
+    quiet = true
     state.value = next as UnwrapRef<T>
+    quiet = false
   }
 
-  const notify = (raw: string | null) => {
-    channel?.postMessage(raw)
-    samePeers?.forEach((peer) => peer !== onPeer && peer(raw))
+  const notify = (message: PeerMessage) => {
+    channel?.postMessage(message.raw)
+    samePeers?.forEach((peer) => peer !== onPeer && peer(message))
   }
 
   const write = (val: unknown) => {
@@ -302,17 +324,19 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
       if (val === undefined) {
         // JSON has no undefined: storing it wrote the string "undefined",
         // which failed to parse on the next load
-        if (lastWritten === null) return
-        lastWritten = null
+        if (known?.removed && known.payload === undefined) return
         storage.removeItem(storageKey)
-        notify(null)
+        known = { payload: undefined, removed: true }
+        notify({ raw: null, unset: true })
         return
       }
+      const payload = payloadOf(val)
+      if (known && !known.removed && known.payload === payload) return
+      if (known?.removed && known.payload === payload) return
       const raw = encode(toRaw(val) as T)
-      if (raw === lastWritten) return
-      lastWritten = raw
       storage.setItem(storageKey, raw)
-      notify(raw)
+      known = { payload }
+      notify({ raw })
     } catch (error) {
       onError(error, 'write')
     }
@@ -333,34 +357,37 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
 
   const applyExternal = (raw: string | null) => {
     if (raw === null) {
-      lastWritten = null
-      applyQuietly(freshDefaults())
+      const fresh = freshDefaults()
+      known = { payload: payloadOf(fresh), removed: true }
+      assignQuietly(fresh)
       return
     }
-    if (raw === lastWritten) return
     try {
       const decoded = decode(raw)
-      lastWritten = raw
-      applyQuietly(decoded === undefined ? freshDefaults() : decoded)
+      const next = decoded === undefined ? freshDefaults() : decoded
+      known = { payload: payloadOf(next) }
+      assignQuietly(next)
     } catch (error) {
       onError(error, 'sync')
     }
   }
 
-  function onPeer(raw: string | null) {
+  function onPeer(message: PeerMessage) {
     cancelPendingWrite()
-    applyExternal(raw)
+    if (message.unset) {
+      // a peer set undefined: same value here, not the defaults
+      known = { payload: undefined, removed: true }
+      assignQuietly(undefined)
+      return
+    }
+    applyExternal(message.raw)
   }
 
   if (storage) {
     watch(
       state,
       (val) => {
-        if (applied && Object.is(toRaw(val), toRaw(applied.value))) {
-          applied = undefined
-          return
-        }
-        applied = undefined
+        if (known && known.payload === payloadOf(val)) return
         if (writeDebounce === undefined) {
           write(val)
           return
@@ -371,14 +398,10 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
           write(state.value)
         }, writeDebounce)
         // broadcast and same-tab peers do not wait for the debounced write
-        if (val !== undefined) {
-          try {
-            const raw = encode(toRaw(val) as T)
-            channel?.postMessage(raw)
-            samePeers?.forEach((peer) => peer !== onPeer && peer(raw))
-          } catch (error) {
-            onError(error, 'sync')
-          }
+        try {
+          notify(val === undefined ? { raw: null, unset: true } : { raw: encode(toRaw(val) as T) })
+        } catch (error) {
+          onError(error, 'sync')
         }
       },
       { deep: deepWatch }
@@ -409,9 +432,21 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     }
 
     if (deferRead) {
+      watch(
+        state,
+        () => {
+          if (!quiet) touched = true
+        },
+        { flush: 'sync', deep: deepWatch }
+      )
       onMounted(() => {
+        // a write made before mount - a child's onMounted runs first - is
+        // newer than storage and already on its way there: keep it
+        if (touched) return
         const stored = readStored()
-        if (stored !== undefined) applyQuietly(stored)
+        if (stored === undefined) return
+        known = { payload: payloadOf(stored) }
+        assignQuietly(stored)
       })
     }
   }
@@ -458,21 +493,24 @@ export function useState<T>(initialValue: T, options: UseStateOptions<T> = {}): 
     reset: () => {
       cancelPendingWrite()
       const fresh = freshDefaults()
-      state.value = fresh as UnwrapRef<T>
+      // reset persists the defaults, even over a removed entry
+      known = undefined
       write(fresh)
+      assignQuietly(fresh)
     },
     clear: () => {
       cancelPendingWrite()
+      const fresh = freshDefaults()
       try {
         storage?.removeItem(storageKey)
         if (storage) {
-          lastWritten = null
-          notify(null)
+          known = { payload: payloadOf(fresh), removed: true }
+          notify({ raw: null })
         }
       } catch (error) {
         onError(error, 'write')
       }
-      applyQuietly(freshDefaults())
+      assignQuietly(fresh)
     },
     flush
   }

@@ -225,9 +225,9 @@ clear() // removes the storage entry and restores the initial value
 flush() // writes a pending debounced value right now
 ```
 
-The initial value is copied, never shared: editing the state deeply leaves `defaultFilters` untouched, so `reset()` always goes back to the real defaults, and two stores built from one constant stay independent.
+The initial value is copied, never shared: editing the state deeply leaves `defaultFilters` untouched, so `reset()` always goes back to the real defaults, and two stores built from one constant stay independent. Plain objects and arrays are copied at any depth; class instances, functions and `markRaw` objects are kept as they are.
 
-Setting `undefined` removes the entry instead of storing it. Values JSON cannot represent — `Date`, `Map`, `Set`, `NaN` — need a custom `serializer`.
+Setting `undefined` removes the entry instead of storing it: instances in the same tab see `undefined` too, other tabs see the initial value, as a reload would. Values JSON cannot represent — `Date`, `Map`, `Set`, `NaN` — need a custom `serializer`.
 
 ## SSR
 
@@ -277,7 +277,7 @@ A pending write is flushed when the component unmounts and when the page is hidd
 
 | Capability                          | `vue-smart-state` | `@vueuse/core` `useStorage` | `pinia-plugin-persistedstate` |
 | ----------------------------------- | :---------------: | :-------------------------: | :---------------------------: |
-| Bundle size (min+gzip)              | ~2.2 kB, 0 deps   | tree-shakeable, part of a large suite | small, requires Pinia |
+| Bundle size (min+gzip)              | ~2.4 kB, 0 deps   | tree-shakeable, part of a large suite | small, requires Pinia |
 | React-style tuple + functional updater | ✅             | ❌ (single ref)             | ❌ (store plugin)             |
 | TTL / expiry of persisted values    | ✅                | ❌                          | ❌                            |
 | Versioned migrations                | ✅                | ❌                          | ❌                            |
