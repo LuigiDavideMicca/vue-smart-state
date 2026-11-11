@@ -33,7 +33,13 @@ export function cookieStorage(options: CookieStorageOptions = {}): StorageLike {
       const prefix = `${encodeURIComponent(key)}=`
       for (const part of document.cookie.split(';')) {
         const trimmed = part.trim()
-        if (trimmed.startsWith(prefix)) return decodeURIComponent(trimmed.slice(prefix.length))
+        if (!trimmed.startsWith(prefix)) continue
+        try {
+          return decodeURIComponent(trimmed.slice(prefix.length))
+        } catch {
+          // a cookie someone else wrote with a bare % is not ours to read
+          return null
+        }
       }
       return null
     },

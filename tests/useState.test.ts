@@ -226,8 +226,8 @@ describe('schema', () => {
     expect(state.value).toBe('padded')
   })
 
-  it('rejects async validation with a console.error and keeps the initial value', () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  it('rejects async validation through onError and keeps the initial value', () => {
+    const onError = vi.fn()
     const asyncSchema: StandardSchemaV1<unknown, string> = {
       '~standard': {
         version: 1,
@@ -236,9 +236,10 @@ describe('schema', () => {
       }
     }
     localStorage.setItem(KEY, '"stored"')
-    const [state] = useState('init', { persist: true, storageKey: KEY, schema: asyncSchema })
+    const [state] = useState('init', { persist: true, storageKey: KEY, schema: asyncSchema, onError })
     expect(state.value).toBe('init')
-    expect(error).toHaveBeenCalledOnce()
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0]?.[1]).toBe('read')
   })
 
   it('wins over parse when both are given', () => {

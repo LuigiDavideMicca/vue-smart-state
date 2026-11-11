@@ -82,14 +82,18 @@ import { z } from 'zod'
 
 const Prefs = z.object({ theme: z.enum(['light', 'dark']), fontSize: z.number() })
 
-const [prefs, setPrefs] = useState({ theme: 'light', fontSize: 14 }, {
+type Prefs = z.infer<typeof Prefs>
+
+const [prefs, setPrefs] = useState<Prefs>({ theme: 'light', fontSize: 14 }, {
   persist: true,
   storageKey: 'prefs',
-  schema: Prefs // the state type is inferred from the schema
+  schema: Prefs
 })
 ```
 
-The schema runs on hydration and on values arriving from other tabs. Only synchronous validation is supported — an async schema logs a `console.error` and keeps the initial value. No schema library? A plain guard works too:
+The state type comes from the type parameter (or the initial value); the schema has to produce that type, so a mismatch between the two is a compile error. Annotate it as above when the initial value is wider than the schema — a plain `'light'` literal would let `setPrefs({ theme: 'nope' })` compile.
+
+The schema runs on hydration and on values arriving from other tabs. Only synchronous validation is supported — an async schema is reported to `onError` and the initial value is kept. No schema library? A plain guard works too:
 
 ```ts
 const [count] = useState(0, {
@@ -177,21 +181,27 @@ Plain Vue SSR works the same way: read the cookie from the incoming request on t
 ## Cross-tab sync
 
 ```ts
-const [cart, setCart] = useState([], {
+interface Item { id: number; qty: number }
+
+const [cart, setCart] = useState<Item[]>([], {
   persist: true,
   storageKey: 'cart',
   syncTabs: true
 })
 ```
 
-Changes in one tab appear in every other tab via the `storage` event. If another tab clears the key, the state falls back to the initial value. Listeners registered inside a component are removed with it; at module level (global stores) they live for the session — on purpose.
+Changes in one tab appear in every other tab via the `storage` event. If another tab removes the key — or clears its storage — the state falls back to the initial value and stays removed. Listeners registered inside a component are removed with it; at module level (global stores) they live for the session — on purpose.
+
+Within one tab, every `useState` persisting under the same storage and key stays in sync on its own, with or without `syncTabs`: two components reading `cart` see the same cart.
+
+> Annotate empty arrays and objects (`useState<Item[]>([])`): TypeScript infers `never[]` from a bare `[]`.
 
 ### BroadcastChannel
 
 `storage` events only fire for `localStorage` writes. `syncTabs: 'broadcast'` syncs through a `BroadcastChannel` named `vss:<storageKey>` instead — it works with any storage backend (cookies included) and delivers the exact written payload:
 
 ```ts
-const [cart, setCart] = useState([], {
+const [cart, setCart] = useState<Item[]>([], {
   persist: true,
   storageKey: 'cart',
   syncTabs: 'broadcast'
@@ -205,18 +215,27 @@ The channel is closed when the owning component is unmounted. Where `BroadcastCh
 The third element of the tuple gives you lifecycle controls:
 
 ```ts
-const [filters, setFilters, { reset, clear }] = useState(defaultFilters, {
+const [filters, setFilters, { reset, clear, flush }] = useState(defaultFilters, {
   persist: true,
   storageKey: 'filters'
 })
 
 reset() // back to the initial value (and persists it)
 clear() // removes the storage entry and restores the initial value
+flush() // writes a pending debounced value right now
 ```
+
+The initial value is copied, never shared: editing the state deeply leaves `defaultFilters` untouched, so `reset()` always goes back to the real defaults, and two stores built from one constant stay independent.
+
+Setting `undefined` removes the entry instead of storing it. Values JSON cannot represent — `Date`, `Map`, `Set`, `NaN` — need a custom `serializer`.
 
 ## SSR
 
-Safe out of the box: on the server (Nuxt, SSG builds) storage and window listeners are skipped and the state starts from the initial value. No guards needed in your code.
+On the server (Nuxt, SSG builds) storage, window listeners and cross-tab channels are skipped, and the state starts from the initial value. Two things are yours to decide:
+
+**Hydration.** The server cannot see `localStorage`, so it renders the initial value. By default the client reads storage during setup — right for client-only apps, where it means no flash — which in a server-rendered app makes the first client render differ from the server's HTML. Pass `hydrate: 'mounted'` there: the page hydrates with the initial value and switches to the stored one right after mount, without a mismatch. For values the server must render correctly from the first byte, store them in a cookie and pass the server-read value as the initial value (see the cookie recipe above).
+
+**Isolation.** State created inside `setup()` belongs to one component instance, hence to one request. A store created at module level is one object shared by every request the server handles — fine in the browser, a data leak on the server. Keep per-user state inside `setup()` (or a Pinia/Nuxt per-request store) in server-rendered apps.
 
 ## Options
 
@@ -230,7 +249,8 @@ Safe out of the box: on the server (Nuxt, SSG builds) storage and window listene
 | `deepWatch`   | `boolean`                                   | `false`        | Persist nested mutations too.                                           |
 | `syncTabs`    | `boolean \| 'storage' \| 'broadcast'`       | `false`        | Sync across tabs via `storage` events or a `BroadcastChannel`.          |
 | `ttl`         | `number`                                    | —              | Milliseconds a persisted value stays fresh.                             |
-| `writeDebounce` | `number`                                  | —              | Debounce storage writes (pending writes flush on component unmount).    |
+| `writeDebounce` | `number`                                  | —              | Debounce storage writes; pending writes flush on unmount and when the page is hidden or closed. |
+| `hydrate`     | `'immediate' \| 'mounted'`                  | `'immediate'`  | Read storage during setup, or after mount to hydrate SSR pages without a mismatch. |
 | `serializer`  | `{ read(raw): T; write(value): string }`    | JSON           | Custom (de)serialization.                                               |
 | `schema`      | `StandardSchemaV1<unknown, T>`              | —              | Standard Schema (Zod 4, Valibot, ArkType…) validating restored data.    |
 | `parse`       | `(value: unknown) => T`                     | —              | Manual validation: return the value or throw. Ignored when `schema` is set. |
@@ -247,15 +267,17 @@ Persisting a text input? Don't hammer storage on every keystroke:
 const [draft, setDraft] = useState('', {
   persist: true,
   storageKey: 'message-draft',
-  writeDebounce: 300 // ms — a pending write is flushed if the component unmounts
+  writeDebounce: 300 // ms
 })
 ```
+
+A pending write is flushed when the component unmounts and when the page is hidden or closed, so the last keystroke is not lost with the tab. Same-tab instances and `'broadcast'` sync see every change at once; `storage`-event sync follows the debounced write.
 
 ## How it compares
 
 | Capability                          | `vue-smart-state` | `@vueuse/core` `useStorage` | `pinia-plugin-persistedstate` |
 | ----------------------------------- | :---------------: | :-------------------------: | :---------------------------: |
-| Bundle size (min+gzip)              | ~2 kB, 0 deps     | tree-shakeable, part of a large suite | small, requires Pinia |
+| Bundle size (min+gzip)              | ~2.2 kB, 0 deps   | tree-shakeable, part of a large suite | small, requires Pinia |
 | React-style tuple + functional updater | ✅             | ❌ (single ref)             | ❌ (store plugin)             |
 | TTL / expiry of persisted values    | ✅                | ❌                          | ❌                            |
 | Versioned migrations                | ✅                | ❌                          | ❌                            |
